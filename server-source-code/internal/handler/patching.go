@@ -1022,16 +1022,22 @@ func (h *PatchingHandler) Trigger(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Compose the set of repo names to skip for this run:
-	//   persistent (host_repositories.is_enabled = false) ∪ per-run override.
-	// Per-run override is layered on top so the user can skip an extra repo
-	// for one run without permanently disabling it. We send repo NAMES (not
-	// IDs) because the agent passes them straight to `dnf --disablerepo=...`,
-	// which keys on the repo id/name string from /etc/yum.repos.d/.
+	//   per-host disabled ∪ globally inactive ∪ per-run override.
+	// Per-host is host_repositories.is_enabled = false; globally inactive is
+	// repositories.is_active = false (set from the repository edit page —
+	// affects every host that has the repo). Per-run override is layered on
+	// top so the user can skip an extra repo for one run without permanently
+	// disabling it anywhere. We send repo NAMES (not IDs) because the agent
+	// passes them straight to `dnf --disablerepo=...`, which keys on the
+	// repo id/name string from /etc/yum.repos.d/.
 	disabledRepoSet := make(map[string]struct{})
 	if h.repos != nil {
 		if hrs, repoErr := h.repos.GetByHost(r.Context(), body.HostID); repoErr == nil {
 			for _, hr := range hrs {
-				if !hr.IsEnabled && hr.Repositories.Name != "" {
+				if hr.Repositories.Name == "" {
+					continue
+				}
+				if !hr.IsEnabled || !hr.Repositories.IsActive {
 					disabledRepoSet[hr.Repositories.Name] = struct{}{}
 				}
 			}
