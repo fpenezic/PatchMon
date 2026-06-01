@@ -49,6 +49,7 @@ type PatchingHandler struct {
 	exclusions     *store.PatchPolicyExclusionsStore
 	hosts          *store.HostsStore
 	settings       *store.SettingsStore
+	repos          *store.RepositoriesStore
 	cfg            *config.Config
 	queueClient    *asynq.Client
 	queueInspector *asynq.Inspector
@@ -70,6 +71,7 @@ func NewPatchingHandler(
 	exclusions *store.PatchPolicyExclusionsStore,
 	hosts *store.HostsStore,
 	settings *store.SettingsStore,
+	repos *store.RepositoriesStore,
 	cfg *config.Config,
 	queueClient *asynq.Client,
 	queueInspector *asynq.Inspector,
@@ -86,6 +88,7 @@ func NewPatchingHandler(
 		exclusions:     exclusions,
 		hosts:          hosts,
 		settings:       settings,
+		repos:          repos,
 		cfg:            cfg,
 		queueClient:    queueClient,
 		queueInspector: queueInspector,
@@ -871,6 +874,10 @@ func (h *PatchingHandler) Trigger(w http.ResponseWriter, r *http.Request) {
 		// for any patch_type (including patch_all, which cannot dry-run).
 		PendingApproval  bool   `json:"pending_approval"`
 		ScheduleOverride string `json:"schedule_override"` // "immediate" to bypass policy delay
+		// DisabledRepos: yum/dnf repo IDs to skip for this run, layered on top
+		// of the host's persistent host_repositories.is_enabled=false set.
+		// Empty / omitted means "use the host's persistent disabled set".
+		DisabledRepos []string `json:"disabled_repos"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		JSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid JSON"})
@@ -1014,15 +1021,44 @@ func (h *PatchingHandler) Trigger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Compose the set of repo names to skip for this run:
+	//   persistent (host_repositories.is_enabled = false) ∪ per-run override.
+	// Per-run override is layered on top so the user can skip an extra repo
+	// for one run without permanently disabling it. We send repo NAMES (not
+	// IDs) because the agent passes them straight to `dnf --disablerepo=...`,
+	// which keys on the repo id/name string from /etc/yum.repos.d/.
+	disabledRepoSet := make(map[string]struct{})
+	if h.repos != nil {
+		if hrs, repoErr := h.repos.GetByHost(r.Context(), body.HostID); repoErr == nil {
+			for _, hr := range hrs {
+				if !hr.IsEnabled && hr.Repositories.Name != "" {
+					disabledRepoSet[hr.Repositories.Name] = struct{}{}
+				}
+			}
+		} else {
+			h.log.Warn("patching: failed to load host repositories for disable-set; proceeding without persistent disabled repos", "host_id", body.HostID, "error", repoErr)
+		}
+	}
+	for _, name := range body.DisabledRepos {
+		if name = strings.TrimSpace(name); name != "" {
+			disabledRepoSet[name] = struct{}{}
+		}
+	}
+	disabledRepos := make([]string, 0, len(disabledRepoSet))
+	for name := range disabledRepoSet {
+		disabledRepos = append(disabledRepos, name)
+	}
+
 	task, err := queue.NewRunPatchTask(queue.RunPatchPayload{
-		HostID:       body.HostID,
-		Host:         r.Header.Get("X-Forwarded-Host"),
-		ApiID:        host.ApiID,
-		PatchRunID:   patchRunID,
-		PatchType:    body.PatchType,
-		PackageName:  pkgName,
-		PackageNames: pkgNames,
-		DryRun:       body.DryRun,
+		HostID:        body.HostID,
+		Host:          r.Header.Get("X-Forwarded-Host"),
+		ApiID:         host.ApiID,
+		PatchRunID:    patchRunID,
+		PatchType:     body.PatchType,
+		PackageName:   pkgName,
+		PackageNames:  pkgNames,
+		DryRun:        body.DryRun,
+		DisabledRepos: disabledRepos,
 	})
 	if err != nil {
 		h.log.Error("patching: create task error", "error", err)

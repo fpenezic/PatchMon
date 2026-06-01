@@ -42,6 +42,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import InlineEdit from "../components/InlineEdit";
 import InlineMultiGroupEdit from "../components/InlineMultiGroupEdit";
+import InlineToggle from "../components/InlineToggle";
 import { PackageListDisplay } from "../components/PackageListDisplay";
 import { PatchRunStatusBadge } from "../components/PatchRunStatusBadge";
 import PatchWizard from "../components/PatchWizard";
@@ -392,6 +393,16 @@ const HostDetail = () => {
 	};
 
 	// Force agent update mutation
+	const toggleHostRepoMutation = useMutation({
+		mutationFn: ({ repositoryId, isEnabled }) =>
+			repositoryAPI
+				.toggleHostRepository(hostId, repositoryId, isEnabled)
+				.then((res) => res.data),
+		onSuccess: () => {
+			queryClient.invalidateQueries(["host-repositories", hostId]);
+		},
+	});
+
 	const forceAgentUpdateMutation = useMutation({
 		mutationFn: () =>
 			adminHostsAPI.forceAgentUpdate(hostId).then((res) => res.data),
@@ -2549,6 +2560,17 @@ const HostDetail = () => {
 						</button>
 						<button
 							type="button"
+							onClick={() => handleTabChange("repositories")}
+							className={`px-4 py-2 text-sm font-medium ${
+								activeTab === "repositories"
+									? "text-primary-600 dark:text-primary-400 border-b-2 border-primary-500"
+									: "text-secondary-500 dark:text-white hover:text-secondary-700 dark:hover:text-primary-400"
+							}`}
+						>
+							Repositories
+						</button>
+						<button
+							type="button"
 							onClick={() => handleTabChange("notes")}
 							className={`px-4 py-2 text-sm font-medium ${
 								activeTab === "notes"
@@ -3736,6 +3758,83 @@ const HostDetail = () => {
 										</div>
 									</div>
 								</div>
+							</div>
+						)}
+
+						{/* Repositories */}
+						{activeTab === "repositories" && (
+							<div className="space-y-4">
+								<div className="flex items-center justify-between">
+									<div>
+										<h2 className="text-lg font-semibold text-secondary-900 dark:text-white">
+											Repositories
+										</h2>
+										<p className="text-sm text-secondary-500 dark:text-white">
+											Disabled repositories are skipped during patch runs via{" "}
+											<code className="text-xs">--disablerepo</code> (dnf/yum
+											only). Useful for working around a temporarily broken or
+											GPG-misconfigured repo without removing it from the host.
+											Apt-based hosts ignore this setting.
+										</p>
+									</div>
+								</div>
+								{isLoadingRepos && (
+									<div className="text-sm text-secondary-500 dark:text-white">
+										Loading repositories...
+									</div>
+								)}
+								{!isLoadingRepos &&
+									(!repositories || repositories.length === 0) && (
+										<div className="text-sm text-secondary-500 dark:text-white">
+											No repositories reported for this host yet.
+										</div>
+									)}
+								{!isLoadingRepos &&
+									repositories &&
+									repositories.length > 0 && (
+										<div className="overflow-x-auto">
+											<table className="min-w-full divide-y divide-secondary-200 dark:divide-secondary-600">
+												<thead>
+													<tr>
+														<th className="px-4 py-2 text-left text-xs font-medium text-secondary-500 dark:text-white uppercase tracking-wider">
+															Name
+														</th>
+														<th className="px-4 py-2 text-left text-xs font-medium text-secondary-500 dark:text-white uppercase tracking-wider">
+															URL
+														</th>
+														<th className="px-4 py-2 text-left text-xs font-medium text-secondary-500 dark:text-white uppercase tracking-wider">
+															Enabled for patching
+														</th>
+													</tr>
+												</thead>
+												<tbody className="divide-y divide-secondary-200 dark:divide-secondary-600">
+													{repositories.map((hr) => (
+														<tr key={hr.id}>
+															<td className="px-4 py-2 text-sm text-secondary-900 dark:text-white">
+																{hr.repositories?.name || "(unnamed)"}
+															</td>
+															<td className="px-4 py-2 text-xs text-secondary-500 dark:text-white font-mono truncate max-w-md">
+																{hr.repositories?.url}
+															</td>
+															<td className="px-4 py-2">
+																<InlineToggle
+																	value={hr.is_enabled}
+																	onSave={(enabled) =>
+																		toggleHostRepoMutation.mutate({
+																			repositoryId: hr.repository_id,
+																			isEnabled: enabled,
+																		})
+																	}
+																	trueLabel="Enabled"
+																	falseLabel="Disabled"
+																/>
+															</td>
+														</tr>
+													))}
+												</tbody>
+											</table>
+										</div>
+									)}
 							</div>
 						)}
 

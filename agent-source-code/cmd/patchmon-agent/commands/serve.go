@@ -380,7 +380,7 @@ func runServiceLoop(stopCh <-chan struct{}) error {
 				go refreshDockerInventory(ctx)
 			case "run_patch":
 				go func(msg wsMsg) {
-					if err := runPatch(msg.patchRunID, msg.patchType, msg.packageNames, msg.dryRun); err != nil {
+					if err := runPatch(msg.patchRunID, msg.patchType, msg.packageNames, msg.dryRun, msg.disabledRepos); err != nil {
 						logger.WithError(err).Warn("run_patch failed")
 					} else {
 						logger.Info("run_patch completed successfully")
@@ -1165,11 +1165,12 @@ type wsMsg struct {
 	sshProxyCols       int    // Terminal columns
 	sshProxyRows       int    // Terminal rows
 	// run_patch fields
-	patchRunID   string
-	patchType    string
-	packageNames []string
-	dryRun       bool
-	sshProxyData string // SSH input data
+	patchRunID    string
+	patchType     string
+	packageNames  []string
+	dryRun        bool
+	disabledRepos []string // yum/dnf repo names to pass through --disablerepo
+	sshProxyData  string   // SSH input data
 	// RDP proxy fields
 	rdpProxySessionID string // Unique session ID for RDP proxy
 	rdpProxyHost      string // RDP target host (default localhost)
@@ -1596,11 +1597,12 @@ func connectOnce(out chan<- wsMsg, dockerEvents <-chan interface{}, backoff *tim
 			Rows       int    `json:"rows"`        // Terminal rows
 			Data       string `json:"data"`        // SSH input data
 			// run_patch fields
-			PatchRunID   string   `json:"patch_run_id"`
-			PatchType    string   `json:"patch_type"`
-			PackageName  string   `json:"package_name"`
-			PackageNames []string `json:"package_names"`
-			DryRun       bool     `json:"dry_run"`
+			PatchRunID    string   `json:"patch_run_id"`
+			PatchType     string   `json:"patch_type"`
+			PackageName   string   `json:"package_name"`
+			PackageNames  []string `json:"package_names"`
+			DryRun        bool     `json:"dry_run"`
+			DisabledRepos []string `json:"disabled_repos"`
 		}
 		if err := json.Unmarshal(data, &payload); err != nil {
 			logger.WithError(err).WithField("message_bytes", len(data)).Warn("Failed to parse WebSocket message")
@@ -1660,18 +1662,33 @@ func connectOnce(out chan<- wsMsg, dockerEvents <-chan interface{}, backoff *tim
 				logger.Warn("run_patch patch_package requires package_name or package_names")
 				continue
 			}
+			// disabled_repos: yum/dnf repo IDs. Same charset constraint as
+			// package names — repo IDs in /etc/yum.repos.d/ are alphanumerics
+			// plus dots, hyphens, underscores. Anything else gets dropped so
+			// a malformed server message cannot inject shell metacharacters
+			// into the dnf command line.
+			var disabledRepos []string
+			for _, repo := range payload.DisabledRepos {
+				if validAptPackagePattern.MatchString(repo) {
+					disabledRepos = append(disabledRepos, repo)
+				} else {
+					logger.WithField("repo", logutil.Sanitize(repo)).Warn("Invalid repo name in run_patch disabled_repos, dropping")
+				}
+			}
 			logger.WithFields(logutil.SanitizeMap(map[string]interface{}{
-				"patch_run_id":  payload.PatchRunID,
-				"patch_type":    patchType,
-				"package_names": packageNames,
-				"dry_run":       payload.DryRun,
+				"patch_run_id":   payload.PatchRunID,
+				"patch_type":     patchType,
+				"package_names":  packageNames,
+				"dry_run":        payload.DryRun,
+				"disabled_repos": disabledRepos,
 			})).Info("run_patch received")
 			out <- wsMsg{
-				kind:         "run_patch",
-				patchRunID:   payload.PatchRunID,
-				patchType:    patchType,
-				packageNames: packageNames,
-				dryRun:       payload.DryRun,
+				kind:          "run_patch",
+				patchRunID:    payload.PatchRunID,
+				patchType:     patchType,
+				packageNames:  packageNames,
+				dryRun:        payload.DryRun,
+				disabledRepos: disabledRepos,
 			}
 		case "update_notification":
 			logger.WithFields(logutil.SanitizeMap(map[string]interface{}{
@@ -2194,7 +2211,7 @@ func patchRunTrailer(wasStopped bool, stepErr error, dryRun bool) string {
 }
 
 // When dryRun is true, simulates and sends dry_run_completed instead of completed.
-func runPatch(patchRunID, patchType string, packageNames []string, dryRun bool) error {
+func runPatch(patchRunID, patchType string, packageNames []string, dryRun bool, disabledRepos []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
 
@@ -2211,6 +2228,16 @@ func runPatch(patchRunID, patchType string, packageNames []string, dryRun bool) 
 
 	if pkgManager == "windows" {
 		return runPatchWindows(ctx, httpClient, patchRunID, patchType, packageNames, dryRun)
+	}
+
+	// Build the --disablerepo args for yum/dnf. Only honoured by yum/dnf —
+	// apt has no equivalent flag, so disabled_repos is silently ignored on
+	// Debian/Ubuntu (callers know this; documented in RunPatchPayload).
+	var disableRepoArgs []string
+	if (pkgManager == "dnf" || pkgManager == "yum") && len(disabledRepos) > 0 {
+		for _, repo := range disabledRepos {
+			disableRepoArgs = append(disableRepoArgs, "--disablerepo="+repo)
+		}
 	}
 
 	if pkgManager != "apt" && pkgManager != "dnf" && pkgManager != "yum" && pkgManager != "pkg" && pkgManager != "pacman" {
@@ -2321,7 +2348,10 @@ func runPatch(patchRunID, patchType string, packageNames []string, dryRun bool) 
 				stepErr = err
 			}
 		default:
-			if err, abort := runStep(false, upgradeBin+" makecache", upgradeBin+" makecache failed: %w", upgradeBin, "makecache", "-q"); abort {
+			// disableRepoArgs (--disablerepo=...) goes before the subcommand
+			// so dnf parses it as a global option rather than a positional.
+			args := append(append([]string{}, disableRepoArgs...), "makecache", "-q")
+			if err, abort := runStep(false, upgradeBin+" makecache", upgradeBin+" makecache failed: %w", upgradeBin, args...); abort {
 				stepErr = err
 			}
 		}
@@ -2362,11 +2392,13 @@ func runPatch(patchRunID, patchType string, packageNames []string, dryRun bool) 
 				}
 			default: // dnf, yum
 				if dryRun {
-					if err, abort := runStep(true, upgradeBin+" upgrade --assumeno", upgradeBin+" upgrade --assumeno failed: %w", upgradeBin, "upgrade", "--assumeno"); abort {
+					args := append(append([]string{}, disableRepoArgs...), "upgrade", "--assumeno")
+					if err, abort := runStep(true, upgradeBin+" upgrade --assumeno", upgradeBin+" upgrade --assumeno failed: %w", upgradeBin, args...); abort {
 						stepErr = err
 					}
 				} else {
-					if err, abort := runStep(false, upgradeBin+" upgrade", upgradeBin+" upgrade failed: %w", upgradeBin, "upgrade", "-y"); abort {
+					args := append(append([]string{}, disableRepoArgs...), "upgrade", "-y")
+					if err, abort := runStep(false, upgradeBin+" upgrade", upgradeBin+" upgrade failed: %w", upgradeBin, args...); abort {
 						stepErr = err
 					}
 				}
@@ -2418,12 +2450,12 @@ func runPatch(patchRunID, patchType string, packageNames []string, dryRun bool) 
 				}
 			default: // dnf, yum
 				if dryRun {
-					args := append([]string{"install", "--assumeno"}, packageNames...)
+					args := append(append(append([]string{}, disableRepoArgs...), "install", "--assumeno"), packageNames...)
 					if err, abort := runStep(true, upgradeBin+" install --assumeno", upgradeBin+" install --assumeno failed: %w", upgradeBin, args...); abort {
 						stepErr = err
 					}
 				} else {
-					args := append([]string{"install", "-y"}, packageNames...)
+					args := append(append(append([]string{}, disableRepoArgs...), "install", "-y"), packageNames...)
 					if err, abort := runStep(false, upgradeBin+" install", upgradeBin+" install failed: %w", upgradeBin, args...); abort {
 						stepErr = err
 					}

@@ -159,7 +159,8 @@ func NewRouter(ctx context.Context, cfg *config.Config, db *database.DB, rdb *re
 	pendingConfigStore := store.NewPendingConfigStore(dbProvider)
 	hostsHandler := handler.NewHostsHandler(hostsStore, hostGroupsStore, settingsStore, queueClient, registry, integrationStatusStore, pendingConfigStore, dbProvider, notifyEmit)
 	packagesHandler := handler.NewPackagesHandler(store.NewPackagesStore(dbProvider))
-	repositoriesHandler := handler.NewRepositoriesHandler(store.NewRepositoriesStore(dbProvider))
+	repositoriesStore := store.NewRepositoriesStore(dbProvider)
+	repositoriesHandler := handler.NewRepositoriesHandler(repositoriesStore)
 	dockerStore := store.NewDockerStore(dbProvider)
 	dashboardStore := store.NewDashboardStore(dbProvider)
 	dashboardHandler := handler.NewDashboardHandler(
@@ -243,7 +244,7 @@ func NewRouter(ctx context.Context, cfg *config.Config, db *database.DB, rdb *re
 	patchPoliciesStore := store.NewPatchPoliciesStore(dbProvider)
 	patchAssignmentsStore := store.NewPatchPolicyAssignmentsStore(dbProvider)
 	patchExclusionsStore := store.NewPatchPolicyExclusionsStore(dbProvider)
-	patchingHandler := handler.NewPatchingHandler(patchRunsStore, patchPoliciesStore, patchAssignmentsStore, patchExclusionsStore, hostsStore, settingsStore, cfg, queueClient, queueInspector, notifyEmit, log)
+	patchingHandler := handler.NewPatchingHandler(patchRunsStore, patchPoliciesStore, patchAssignmentsStore, patchExclusionsStore, hostsStore, settingsStore, repositoriesStore, cfg, queueClient, queueInspector, notifyEmit, log)
 	// Wire up the live patch-run stream hub and the agent WebSocket registry
 	// for the stop-run endpoint. Kept as optional dependencies so unrelated
 	// call-sites don't need to thread them.

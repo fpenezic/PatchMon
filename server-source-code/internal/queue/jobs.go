@@ -131,6 +131,10 @@ type RunPatchPayload struct {
 	PackageName  *string  `json:"package_name,omitempty"`
 	PackageNames []string `json:"package_names,omitempty"`
 	DryRun       bool     `json:"dry_run,omitempty"`
+	// DisabledRepos lists yum/dnf repo IDs to skip for this patch run.
+	// Empty list means "use whatever the host's package manager has enabled".
+	// Apt is not affected — the agent ignores this list when running apt-get.
+	DisabledRepos []string `json:"disabled_repos,omitempty"`
 }
 
 // NewRunPatchTask creates a run_patch task.
@@ -659,6 +663,9 @@ func (h *RunPatchHandler) ProcessTask(ctx context.Context, t *asynq.Task) error 
 	}
 	if len(p.PackageNames) > 0 {
 		payload["package_names"] = p.PackageNames
+	}
+	if len(p.DisabledRepos) > 0 {
+		payload["disabled_repos"] = p.DisabledRepos
 	}
 	msg, err := json.Marshal(payload)
 	if err != nil {
